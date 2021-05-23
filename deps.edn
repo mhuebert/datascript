@@ -12,15 +12,23 @@
   
     :1.10 {
       :override-deps {
-        org.clojure/clojure {:mvn/version "1.10.2"}
+        org.clojure/clojure {:mvn/version "1.10.3"}
       }
     }
 
     :dev {
       :extra-paths ["dev" "target/classes"]
       :extra-deps {
-        org.clojure/clojurescript {:mvn/version "1.10.520"}
+        org.clojure/clojurescript {:mvn/version "1.10.866"}
         org.clojure/tools.namespace {:mvn/version "0.2.11"}
+      }
+    }
+
+    :transit {
+      :extra-paths ["transit"]
+      :extra-deps {
+        datascript-transit/datascript-transit {:mvn/version "0.3.0"}
+        com.cognitect/transit-clj {:mvn/version "1.0.324"}
       }
     }
 

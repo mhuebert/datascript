@@ -22,6 +22,25 @@
 (def ^:const txmax 0x7FFFFFFF)
 (def ^:const implicit-schema {:db/ident {:db/unique :db.unique/identity}})
 
+(def *t-start (atom 0))
+(def *t-last (atom 0))
+
+(defn now []
+  #?(:clj (System/currentTimeMillis) :cljs (js/performance.now)))
+
+(defn start-bench! []
+  (reset! *t-start (now))
+  (reset! *t-last (now)))
+
+(defn pad-left [n]
+  (let [s (str n)]
+    (str (clojure.string/join (repeat (- 5 (count s)) " ")) s)))
+
+(defn log-time! [msg]
+  (let [now (now)]
+    (println (pad-left (- now @*t-last)) "ms " msg)
+    (reset! *t-last now)))
+
 ;; ----------------------------------------------------------------------------
 
 #?(:clj
@@ -774,24 +793,38 @@
 (defn ^DB init-db
   ([datoms] (init-db datoms nil))
   ([datoms schema]
+    (log-time! "map [e a v tx] -> datom")
     (when-some [not-datom (first (drop-while datom? datoms))]
       (raise "init-db expects list of Datoms, got " (type not-datom)
         {:error :init-db}))
+    (log-time! "check (every? datom?)")
     (validate-schema schema)
+    (log-time! "validate-schema")
     (let [rschema     (rschema (merge implicit-schema schema))
+          _           (log-time! "rschema")
           indexed     (:db/index rschema)
           arr         (cond-> datoms
                         (not (arrays/array? datoms)) (arrays/into-array))
+          _           (log-time! "into-array")
           _           (arrays/asort arr cmp-datoms-eavt-quick)
+          _           (log-time! "sort #1")
           eavt        (set/from-sorted-array cmp-datoms-eavt arr)
+          _           (log-time! "set/from-sorted-array #1")
           _           (arrays/asort arr cmp-datoms-aevt-quick)
+          _           (log-time! "sort #2")
           aevt        (set/from-sorted-array cmp-datoms-aevt arr)
+          _           (log-time! "set/from-sorted-array #2")
           avet-datoms (filter (fn [^Datom d] (contains? indexed (.-a d))) datoms)
           avet-arr    (to-array avet-datoms)
+          _           (log-time! "to-array (filter indexed? datoms)")
           _           (arrays/asort avet-arr cmp-datoms-avet-quick)
+          _           (log-time! "sort #3")
           avet        (set/from-sorted-array cmp-datoms-avet avet-arr)
+          _           (log-time! "set/from-sorted-array #3")
           max-eid     (init-max-eid eavt)
-          max-tx      (transduce (map (fn [^Datom d] (datom-tx d))) max tx0 eavt)]
+          _           (log-time! "init-max-eid")
+          max-tx      (transduce (map (fn [^Datom d] (datom-tx d))) max tx0 eavt)
+          _           (log-time! "max-tx #2")]
       (map->DB {
         :schema  schema
         :rschema rschema
@@ -859,6 +892,7 @@
 ))
 
 (defn db-from-reader [{:keys [schema datoms]}]
+  (log-time! "transit read")
   (init-db (map (fn [[e a v tx]] (datom e a v tx)) datoms) schema))
 
 ;; ----------------------------------------------------------------------------

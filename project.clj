@@ -7,9 +7,12 @@
   :url "https://github.com/tonsky/datascript"
   
   :dependencies [
-    [org.clojure/clojure       "1.10.2"   :scope "provided"]
-    [org.clojure/clojurescript "1.10.520" :scope "provided"]
+    [org.clojure/clojure       "1.10.3"   :scope "provided"]
+    [org.clojure/clojurescript "1.10.866" :scope "provided"]
     [persistent-sorted-set     "0.1.2"]
+    [datascript-transit        "0.3.0" :exclusions [datascript com.cognitect/transit-clj com.cognitect/transit-cljs]]
+    [com.cognitect/transit-clj  "1.0.324"]
+    [com.cognitect/transit-cljs "0.8.269"]
   ]
   
   :plugins [
@@ -56,6 +59,21 @@
           :recompile-dependents false
           :parallel-build true
           :checked-arrays :warn
+        }}
+
+      { :id "transit"
+        :source-paths ["src" "transit"]
+        :compiler {
+          :output-to     "target/datascript.js"
+          :optimizations :advanced
+          ; :source-map    "target/datascript.js.map"
+          ; :pretty-print  true
+          :recompile-dependents false
+          :parallel-build true
+          :checked-arrays :warn
+          ; :pseudo-names  true
+          :fn-invoke-direct true
+          :elide-asserts true
         }}
 
       { :id "bench"
