@@ -794,10 +794,10 @@
   ([datoms] (init-db datoms nil))
   ([datoms schema]
     (log-time! "map [e a v tx] -> datom")
-    (when-some [not-datom (first (drop-while datom? datoms))]
-      (raise "init-db expects list of Datoms, got " (type not-datom)
-        {:error :init-db}))
-    (log-time! "check (every? datom?)")
+    ; (when-some [not-datom (first (drop-while datom? datoms))]
+    ;   (raise "init-db expects list of Datoms, got " (type not-datom)
+    ;     {:error :init-db}))
+    ; (log-time! "check (every? datom?)")
     (validate-schema schema)
     (log-time! "validate-schema")
     (let [rschema     (rschema (merge implicit-schema schema))
@@ -806,25 +806,53 @@
           arr         (cond-> datoms
                         (not (arrays/array? datoms)) (arrays/into-array))
           _           (log-time! "into-array")
-          _           (arrays/asort arr cmp-datoms-eavt-quick)
-          _           (log-time! "sort #1")
+          ; _           (arrays/asort arr cmp-datoms-eavt-quick)
+          ; _           (log-time! "sort EAVT")
           eavt        (set/from-sorted-array cmp-datoms-eavt arr)
-          _           (log-time! "set/from-sorted-array #1")
+          _           (log-time! "set/from-sorted-array EAVT")
           _           (arrays/asort arr cmp-datoms-aevt-quick)
-          _           (log-time! "sort #2")
+          _           (log-time! "sort AEVT")
           aevt        (set/from-sorted-array cmp-datoms-aevt arr)
-          _           (log-time! "set/from-sorted-array #2")
+          _           (log-time! "set/from-sorted-array AEVT")
           avet-datoms (filter (fn [^Datom d] (contains? indexed (.-a d))) datoms)
           avet-arr    (to-array avet-datoms)
           _           (log-time! "to-array (filter indexed? datoms)")
           _           (arrays/asort avet-arr cmp-datoms-avet-quick)
-          _           (log-time! "sort #3")
+          _           (log-time! "sort AVET")
           avet        (set/from-sorted-array cmp-datoms-avet avet-arr)
-          _           (log-time! "set/from-sorted-array #3")
+          _           (log-time! "set/from-sorted-array AVET")
           max-eid     (init-max-eid eavt)
           _           (log-time! "init-max-eid")
           max-tx      (transduce (map (fn [^Datom d] (datom-tx d))) max tx0 eavt)
-          _           (log-time! "max-tx #2")]
+          _           (log-time! "max-tx")]
+      (map->DB {
+        :schema  schema
+        :rschema rschema
+        :eavt    eavt
+        :aevt    aevt
+        :avet    avet
+        :max-eid max-eid
+        :max-tx  max-tx
+        :hash    (atom 0)})))
+  ([eavt-arr aevt-arr avet-arr schema]
+    (when-some [not-datom (first (drop-while datom? @eavt-arr))]
+      (raise "init-db expects list of Datoms, got " (type not-datom)
+        {:error :init-db}))
+    (log-time! "check (every? datom?)")
+    (validate-schema schema)
+    (log-time! "validate-schema")
+    (let [rschema     (rschema (merge implicit-schema schema))
+          _           (log-time! "rschema")
+          eavt        (set/from-sorted-array cmp-datoms-eavt @eavt-arr)
+          _           (log-time! "set/from-sorted-array EAVT")
+          aevt        (set/from-sorted-array cmp-datoms-aevt @aevt-arr)
+          _           (log-time! "set/from-sorted-array AEVT")
+          avet        (set/from-sorted-array cmp-datoms-avet @avet-arr)
+          _           (log-time! "set/from-sorted-array AVET")
+          max-eid     (init-max-eid eavt)
+          _           (log-time! (str "init-max-eid " max-eid))
+          max-tx      (transduce (map (fn [^Datom d] (datom-tx d))) max tx0 eavt)
+          _           (log-time! (str "max-tx " max-tx))]
       (map->DB {
         :schema  schema
         :rschema rschema

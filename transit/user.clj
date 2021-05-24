@@ -3,15 +3,10 @@
    [cognitect.transit :as t]
    [datascript.core :as d]
    [datascript.db :as db]
-   [datascript.transit :as dt]))
+   [datascript.transit :as dt]
+   [me.tonsky.persistent-sorted-set.arrays :as arrays]))
 
-(defmacro measure [msg & body]
-  `(let [t# (System/currentTimeMillis)
-         res# (do ~@body)]
-     (println (- (System/currentTimeMillis) t#) "ms" ~msg)
-     res#))
-
-#?(:clj (def file (slurp "transit.edn")))
+(def file (slurp "transit.edn"))
 
 (defn ^:export bench [file]
   (db/start-bench!)
@@ -22,7 +17,7 @@
   (dt/write-transit-str db)
   (db/log-time! "TOTAL datascript.transit/write-transit-str")
 
-  (count (:eavt db)))
+  db)
 
 (defn stats [db]
   (let [keys (into #{} (map :a) (:eavt db))]
