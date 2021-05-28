@@ -2,9 +2,11 @@
   (:require
    [clojure.string :as str]
    [cognitect.transit :as t]
+   [com.cognitect.transit :as transit-js]
    [datascript.core :as d]
    [datascript.db :as db]
    [datascript.transit :as dt]
+   [goog.object :as gobject]
    [me.tonsky.persistent-sorted-set.arrays :as arrays]))
 
 (defn read-transit-str [s]
@@ -12,6 +14,30 @@
 
 (defn write-transit-str [o]
   (t/write (t/writer :json {}) o))
+
+(defn read-transit-json [o]
+  (let [reader (t/reader :json {})
+        handlers #js {"$"    (fn [v] (symbol v))
+                      ":"    (fn [v] (keyword v))
+                      "set"  (fn [v] (into #{} v))
+                      "list" (fn [v] (into () (.reverse v)))
+                      "cmap" (fn [v]
+                               (loop [i 0 ret (transient {})]
+                                 (if (< i (alength v))
+                                   (recur (+ i 2)
+                                     (assoc! ret (aget v i) (aget v (inc i))))
+                                   (persistent! ret))))
+                      "with-meta" (fn [v] (with-meta (aget v 0) (aget v 1)))}
+        opts  #js {"handlers"       handlers
+                   "mapBuilder"     (t/MapBuilder.)
+                   "arrayBuilder"   (t/VectorBuilder.)
+                   "prefersStrings" false}
+        cache (transit-js/readCache)]
+    (.decode (transit-js/decoder opts) o cache)))
+
+(defn write-transit-json [o]
+  (let [writer (t/writer :json)]
+    (.write writer o #js {:marshalTop false})))
 
 (defn ^:export write-db [db]
   (db/start-bench!)
@@ -23,7 +49,7 @@
                      (number? %) %
                      (true? %)   %
                      (false? %)  %
-                     :else #js [(write-transit-str %)])
+                     :else #js [(write-transit-json %)])
         write-arr (fn [datoms]
                     (let [arr (arrays/make-array (count datoms))
                           *i  (atom 0)]
@@ -37,7 +63,7 @@
         _         (db/log-time! "aevt")
         avet      (write-arr (:avet db))
         _         (db/log-time! "avet")
-        json      #js {"schema" (write-transit-str (:schema db))
+        json      #js {"schema" (write-transit-json (:schema db))
                        "attrs"  (arrays/into-array (map str attrs))
                        "tx0"    db/tx0
                        "count"  (count (:eavt db))
@@ -53,7 +79,7 @@
   (db/start-bench!)
   (let [json     (js/JSON.parse s)
         _        (db/log-time! "JSON.parse")
-        schema   (read-transit-str (aget json "schema"))
+        schema   (read-transit-json (aget json "schema"))
         attrs    (mapv #(if (str/starts-with? % ":") (keyword (subs % 1)) %) (aget json "attrs"))
         tx0      (aget json "tx0")
         read-arr (fn [json key]
@@ -65,7 +91,7 @@
                                a   (nth attrs (aget da 1))
                                v   (aget da 2)
                                v   (if (arrays/array? v)
-                                     (read-transit-str (aget v 0))
+                                     (read-transit-json (aget v 0))
                                      v)
                                tx  (+ tx0 (aget da 3))]
                            (aset arr i (db/datom e a v tx))))
