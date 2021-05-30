@@ -4,10 +4,12 @@
    [cognitect.transit :as t]
    [com.cognitect.transit :as transit-js]
    [datascript.core :as d]
-   [datascript.db :as db :refer [cond+]]
+   [datascript.db :as db]
    [datascript.transit :as dt]
    [goog.object :as gobject]
-   [me.tonsky.persistent-sorted-set.arrays :as arrays]))
+   [me.tonsky.persistent-sorted-set.arrays :as arrays])
+  (:require-macros
+   [datascript.db :refer [cond+]]))
 
 (defn read-transit-str [s]
   (t/read (t/reader :json {}) s))
@@ -107,6 +109,44 @@
         res         (js/JSON.stringify json #_#_nil 2)
         _           (db/log-time! "JSON.stringify")]
     (println (db/pad-left (- (db/now) @db/*t-start)) "ms " "TOTAL write-db-v2" (count (:eavt db)) "datoms ->" (count res) "bytes")
+    res))
+
+(defn amap-indexed [f xs]
+  (let [arr (arrays/make-array (count xs))]
+    (reduce (fn [idx x] (arrays/aset arr idx (f idx x)) (inc idx)) 0 xs)
+    arr))
+
+(defn ^:export write-db-v3 [db]
+  (db/start-bench!)
+  (let [attrs     (distinct (map :a (:aevt db)))
+        attrs-map (into {} (map vector attrs (range)))
+        _         (db/log-time! "attrs")
+        write-v   #(cond
+                     (string? %) %
+                     (number? %) %
+                     (true? %)   %
+                     (false? %)  %
+                     :else #js [(write-transit-json %)])
+        eavt      (amap-indexed
+                    (fn [idx d]
+                      (set! (.-idx d) idx)
+                      #js [(:e d) (attrs-map (:a d)) (write-v (:v d)) (- (:tx d) db/tx0)])
+                    (:eavt db))
+        _         (db/log-time! "eavt")
+        aevt      (amap-indexed (fn [_ d] (.-idx d)) (:aevt db))
+        _         (db/log-time! "aevt")
+        avet      (amap-indexed (fn [_ d] (.-idx d)) (:avet db))
+        _         (db/log-time! "avet")
+        json        #js {"schema" (write-transit-json (:schema db))
+                         "attrs"  (arrays/into-array (map str attrs))
+                         "tx0"    db/tx0
+                         "count"  (count (:eavt db))
+                         "eavt"   eavt
+                         "aevt"   aevt
+                         "avet"   avet}
+        res         (js/JSON.stringify json) ;; nil 2)
+        _           (db/log-time! "JSON.stringify")]
+    (println (db/pad-left (- (db/now) @db/*t-start)) "ms " "TOTAL write-db-v3" (count (:eavt db)) "datoms ->" (count res) "bytes")
     res))
 
 (defn read-datom [datom-array attrs tx0]
@@ -213,14 +253,29 @@
     (println (db/pad-left (- (db/now) @db/*t-start)) "ms " "TOTAL read-db-v2" (count s) "bytes ->" (count (:eavt db)) "datoms")
     db))
 
+(defn ^:export read-db-v3 [s]
+  (db/start-bench!)
+  (let [json        (js/JSON.parse s)
+        _           (db/log-time! "JSON.parse")
+        schema      (read-transit-json (aget json "schema"))
+        attrs       (mapv #(if (str/starts-with? % ":") (keyword (subs % 1)) %) (aget json "attrs"))
+        tx0         (aget json "tx0")
+        eavt        (read-datoms "eavt" (aget json "eavt") attrs tx0)
+        aevt        (delay (amap-indexed (fn [_ idx] (aget eavt idx)) (aget json "aevt")))
+        avet        (delay (amap-indexed (fn [_ idx] (aget eavt idx)) (aget json "avet")))
+        db          (db/init-db (delay eavt) aevt avet schema)]
+    (println (db/pad-left (- (db/now) @db/*t-start)) "ms " "TOTAL read-db-v3" (count s) "bytes ->" (count (:eavt db)) "datoms")
+    db))
+
 (defn ^:export bench [filename slurp spit]
   (db/start-bench!)
   (let [file (slurp filename)
         _    (db/log-time! (str "Read " filename " length = " (count file) " bytes"))
-        _    (def db (read-db-v1 file))
+        _    (def db (dt/read-transit-str file))
+        _    (println (db/pad-left (- (db/now) @db/*t-start)) "ms " "TOTAL dt/read-transit-str" (count file) "bytes ->" (count (:eavt db)) "datoms")
         [_ basename] (re-matches #"(.*)\.[^.]+" filename)
-        s    (write-db-v2 db)
+        s    (write-db-v3 db)
         _    (spit (str basename "_roundtrip.json") s)
         _    (db/log-time! (str "Write " (str basename "_roundtrip.json") " length = " (count s) " bytes"))
-        _    (read-db-v2 s)]
+        _    (read-db-v3 s)]
     'DONE))
