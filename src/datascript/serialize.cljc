@@ -11,6 +11,9 @@
      (:import
       [datascript.db Datom])))
 
+(def ^:const marker-kw 0)
+(def ^:const marker-other 1)
+
 (defn- if-cljs [env then else]
   (if (:ns env) then else))
 
@@ -29,6 +32,14 @@
      (if-cljs &env
        (list* 'js* (str "{" (str/join "," (repeat (/ (count args) 2) "~{}:~{}")) "}") args)
        `(array-map ~@args))))
+
+(defn- array-get [d i]
+  #?(:clj  (.get ^java.util.List d (int i))
+     :cljs (arrays/aget d i)))
+
+(defn- dict-get [d k]
+  #?(:clj  (.get ^java.util.Map d k)
+     :cljs (arrays/aget d k)))
 
 (defn- amap [f xs]
   #?(:clj
@@ -72,6 +83,13 @@
           (recur (conj! attrs next-attr))
           (persistent! attrs))))))
 
+(def ^{:arglists '([kw])} freeze-kw str)
+
+(defn thaw-kw [s]
+  (if (str/starts-with? s ":")
+    (keyword (subs s 1))
+    s))
+
 (defn ^:export serializable
   "Converts db into a data structure (not string!) that can be fed to JSON
    serializer of your choice (`js/JSON.stringify` in CLJS, `cheshire.core/generate-string` or
@@ -80,9 +98,6 @@
    Options:
 
    Non-primitive values will be serialized using optional :freeze-fn (`pr-str` by default).
-
-   :include-aevt?, :include-avet? Set to false to reduce snapshot size, but increase read times.
-   Defaults to true.
 
    Serialized structure breakdown:
 
@@ -99,14 +114,12 @@
    dtx      :: tx - tx0
    aevt     :: [<index in eavt> ...]
    avet     :: [<index in eavt> ...]"
-  ([db] (serializable db {}))
-  ([db {:keys [freeze-fn include-aevt? include-avet?]
-        :or {freeze-fn     pr-str
-             include-aevt? true
-             include-avet? true}}]
+  ([db]
+   (serializable db {}))
+  ([db {:keys [freeze-fn]
+        :or   {freeze-fn pr-str}}]
    (let [attrs       (all-attrs db)
          attrs-map   (into {} (map vector attrs (range)))
-         _           (db/log-time! "all-attrs")
          *kws        (volatile! (transient []))
          *kw-map     (volatile! (transient {}))
          write-kw    (fn [kw]
@@ -116,8 +129,8 @@
                                          idx      (dec (count keywords))]
                                      (vswap! *kw-map assoc! kw idx)
                                      idx))]
-                         (array 0 idx)))
-         write-other (fn [v] (array 1 (freeze-fn v)))
+                         (array marker-kw idx)))
+         write-other (fn [v] (array marker-other (freeze-fn v)))
          write-v     (fn [v]
                        (cond
                          (string? v)  v
@@ -135,15 +148,9 @@
                                tx (- (.-tx d) db/tx0)]
                            (array e a v tx)))
                        (:eavt db))
-         _           (db/log-time! "eavt")
-         aevt        (when include-aevt?
-                       (amap-indexed (fn [_ ^Datom d] (db/datom-get-idx d)) (:aevt db)))
-         _           (db/log-time! "aevt")
-         avet        (when include-avet?
-                       (amap-indexed (fn [_ ^Datom d] (db/datom-get-idx d)) (:avet db)))
-         _           (db/log-time! "avet")
+         aevt        (amap-indexed (fn [_ ^Datom d] (db/datom-get-idx d)) (:aevt db))
+         avet        (amap-indexed (fn [_ ^Datom d] (db/datom-get-idx d)) (:avet db))
          schema      (freeze-fn (:schema db))
-         freeze-kw   str
          attrs       (amap freeze-kw attrs)
          kws         (amap freeze-kw (persistent! @*kws))]
        (dict
@@ -157,3 +164,48 @@
          "eavt"     eavt
          "aevt"     aevt
          "avet"     avet))))
+
+(defn ^:export from-serializable
+  "Creates db from a data structure (not string!) produced by serializable.
+
+   Non-primitive values will be deserialized using optional :thaw-fn
+   (`clojure.edn/read-string` by default).
+
+   :thaw-fn must match :freeze-fn from serializable."
+  ([serializable] 
+   (from-serializable serializable {}))
+  ([serializable {:keys [thaw-fn]
+                  :or   {thaw-fn edn/read-string}}]
+   (let [tx0      (dict-get serializable "tx0")
+         schema   (thaw-fn (dict-get serializable "schema"))
+         _        (#'db/validate-schema schema)
+         attrs    (->> (dict-get serializable "attrs") (mapv thaw-kw))
+         keywords (->> (dict-get serializable "keywords") (mapv thaw-kw))
+         eavt     (->> (dict-get serializable "eavt")
+                    (amap (fn [arr]
+                            (let [e  (array-get arr 0)
+                                  a  (nth attrs (array-get arr 1))
+                                  v  (array-get arr 2)
+                                  v  (cond
+                                       (number? v)  v
+                                       (string? v)  v
+                                       (boolean? v) v
+                                       (arrays/array? v)
+                                       (let [marker (array-get v 0)]
+                                         (case marker
+                                           marker-kw    (array-get keywords (array-get v 1))
+                                           marker-other (thaw-fn (array-get v 1)))))
+                                  tx (+ tx0 (array-get arr 3))]
+                              (db/datom e a v tx))))
+                    #?(:clj .toArray))
+         aevt     (some->> (dict-get serializable "aevt") (amap #(arrays/aget eavt %)) #?(:clj .toArray))
+         avet     (some->> (dict-get serializable "avet") (amap #(arrays/aget eavt %)) #?(:clj .toArray))]
+     (db/map->DB
+       {:schema  schema
+        :rschema (#'db/rschema (merge db/implicit-schema schema))
+        :eavt    (set/from-sorted-array db/cmp-datoms-eavt eavt)
+        :aevt    (set/from-sorted-array db/cmp-datoms-aevt aevt)
+        :avet    (set/from-sorted-array db/cmp-datoms-avet avet)
+        :max-eid (dict-get serializable "max-eid")
+        :max-tx  (dict-get serializable "max-tx")
+        :hash    (atom 0)}))))

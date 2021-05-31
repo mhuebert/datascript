@@ -337,15 +337,29 @@
         ; _    (db/log-time! (str "Write " (str basename "_roundtrip.json") " length = " (count s) " bytes"))
         ; _    (read-db-v3 s edn/read-string)
 
-        db           (read-db-v3 file edn/read-string)
-        _            (db/start-bench!)
-        serializable (ds/serializable db)
-        _            (println (db/pad-left (- (db/now) @db/*t-start)) "ms " "TOTAL ds/serializable")
-        json         (js/JSON.stringify serializable)
-        _            (db/log-time! (str "JSON.stringify " (count json) " bytes"))
-        _            (spit (str basename "_cljs.json") json)
-        ; transit      (write-transit-str serializable)
-        ; _            (db/log-time! (str "write-transit-str " (count transit) " bytes"))
-        ; _            (spit (str basename "_roundtrip.transit") transit)
+        db            (read-db-v3 file edn/read-string)
+
+        _             (db/start-bench!)
+        serializable  (ds/serializable db)
+        _             (println (db/pad-left (- (db/now) @db/*t-start)) "ms " "TOTAL ds/serializable")
+        json          (js/JSON.stringify serializable)
+        _             (db/log-time! (str "JSON.stringify " (count json) " bytes"))
+        
+        serializable' (js/JSON.parse json)
+        _             (db/log-time! (str "js/JSON.parse " (count json) " bytes"))
+        db'           (ds/from-serializable serializable')
+        _             (db/log-time! (str "ds/from-serializable " (count (:eavt db')) "/" (count (:aevt db')) "/" (count (:avet db')) " datoms"))
+
+        _              (db/start-bench!)
+        json           (-> db
+                         (ds/serializable)
+                         (js/JSON.stringify))
+        _              (db/log-time! "write")
+        db'            (-> json
+                         (js/JSON.parse)
+                         (ds/from-serializable))
+        _              (db/log-time! "read")
+        _              (db/log-time-from-start! (str "roundtrip " (count json) " bytes, " (count (:eavt db')) " / " (count (:aevt db')) " / " (count (:avet db')) " datoms"))
+
         ]
     'DONE))
