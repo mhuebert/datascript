@@ -29,6 +29,8 @@
       :extra-deps {
         datascript-transit/datascript-transit {:mvn/version "0.3.0"}
         com.cognitect/transit-clj {:mvn/version "1.0.324"}
+        cheshire/cheshire {:mvn/version "5.10.0"}
+        metosin/jsonista {:mvn/version "0.3.3"}
       }
     }
 

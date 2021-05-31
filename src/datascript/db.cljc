@@ -41,6 +41,11 @@
     (println (pad-left (- now @*t-last)) "ms " msg)
     (reset! *t-last now)))
 
+(defn log-time-from-start! [msg]
+  (let [now (now)]
+    (println (pad-left (- now @*t-start)) "ms " msg)
+    (reset! *t-last now)))
+
 ;; ----------------------------------------------------------------------------
 
 #?(:clj
@@ -169,13 +174,17 @@
 
 (defprotocol IDatom
   (datom-tx [this])
-  (datom-added [this]))
+  (datom-added [this])
+  (datom-get-idx [this])
+  (datom-set-idx [this value]))
 
-(deftype Datom #?(:clj [^int e a v ^int tx ^:unsynchronized-mutable ^int idx ^:unsynchronized-mutable ^int _hash]
+(deftype Datom #?(:clj  [^int e a v ^int tx ^:unsynchronized-mutable ^int idx ^:unsynchronized-mutable ^int _hash]
                   :cljs [^number e a v ^number tx ^:mutable ^number idx ^:mutable ^number _hash])
   IDatom
   (datom-tx [d] (if (pos? tx) tx (- tx)))
   (datom-added [d] (pos? tx))
+  (datom-get-idx [_] idx)
+  (datom-set-idx [_ value] (set! idx (int value)))
 
   #?@(:cljs
        [IHash

@@ -1,23 +1,55 @@
 (ns user
   (:require
    [cognitect.transit :as t]
+   [cheshire.core :as cheshire]
    [datascript.core :as d]
    [datascript.db :as db]
+   [datascript.serialize :as ds]
    [datascript.transit :as dt]
+   [jsonista.core :as jsonista]
    [me.tonsky.persistent-sorted-set.arrays :as arrays]))
 
 ; (def file (slurp "transit.edn"))
 
-(defn ^:export bench [file]
-  (db/start-bench!)
-  (def db "datascript.transit/read" (dt/read-transit-str file))
-  (println (db/pad-left (- (db/now) @db/*t-start)) "ms " "TOTAL datascript.transit/read-transit-str")
+(defn ^:export bench [filename]
+  (let [[_ basename] (re-matches #"(.*)\.[^.]+" filename)
+        file    (slurp filename)
+        _       (db/start-bench!)
+        db      (dt/read-transit-str file)
+        _       (db/log-time-from-start! "TOTAL datascript.transit/read-transit-str")
 
-  (db/start-bench!)
-  (dt/write-transit-str db)
-  (db/log-time! "TOTAL datascript.transit/write-transit-str")
+        _       (db/start-bench!)
+        transit (dt/write-transit-str db)
+        _       (db/log-time! "TOTAL datascript.transit/write-transit-str")
 
-  db)
+        _            (db/start-bench!)
+        serializable (ds/serializable db)
+        _            (db/log-time-from-start! "TOTAL ds/serializable")
+
+        json         (cheshire/generate-string serializable {:pretty true})
+        _            (db/log-time! (str "cheshire/generate-string " (count json) " bytes"))
+        ; _            (spit (str basename "_roundtrip_clj.json") json)
+
+        json         (jsonista/write-value-as-string serializable)
+        _            (db/log-time! (str "jsonista/write-value-as-string " (count json) " bytes"))
+        
+        _            (db/start-bench!)
+        json         (jsonista/write-value-as-string (ds/serializable db {:include-aevt? false}))
+        _            (db/log-time-from-start! (str "jsonista/write-value-as-string :include-aevt? false " (count json) " bytes"))
+
+        _            (db/start-bench!)
+        json         (jsonista/write-value-as-string (ds/serializable db {:include-aevt? false, :include-avet? false}))
+        _            (db/log-time-from-start! (str "jsonista/write-value-as-string :include-aevt? false, :include-avet? false " (count json) " bytes"))
+
+        _            (db/start-bench!)
+        json         (jsonista/write-value-as-string (ds/serializable db {:freeze-fn dt/write-transit-str}))
+        _            (db/log-time-from-start! (str "jsonista/write-value-as-string :freeze-fn dt/write-transit-str " (count json) " bytes"))
+        
+        transit      (dt/write-transit-str serializable)
+        _            (db/log-time! (str "dt/write-transit-str " (count transit) " bytes"))
+        ]
+
+    'DONE))
 
 (defn stats [db]
   (let [keys (into #{} (map :a) (:eavt db))]
@@ -28,9 +60,8 @@
       (sort-by #(second (second %)))
       (reverse))))
 
-(defn -main [file]
-  (bench (slurp file))
-  :done)
+(defn -main [filename]
+  (bench filename))
 
 (def ^:dynamic *dict)
 
