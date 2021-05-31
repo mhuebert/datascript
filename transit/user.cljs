@@ -6,6 +6,7 @@
    [com.cognitect.transit :as transit-js]
    [datascript.core :as d]
    [datascript.db :as db]
+   [datascript.serialize :as ds]
    [datascript.transit :as dt]
    [goog.object :as gobject]
    [me.tonsky.persistent-sorted-set :as sset]
@@ -323,16 +324,24 @@
 (defn ^:export bench [filename slurp spit]
   (db/start-bench!)
   (let [file (slurp filename)
-        _    (db/log-time! (str "Read " filename " length = " (count file) " bytes"))
-        _    (def db (dt/read-transit-str file))
-        _    (println (db/pad-left (- (db/now) @db/*t-start)) "ms " "TOTAL dt/read-transit-str" (count file) "bytes ->" (count (:eavt db)) "datoms")
+        ; _    (db/log-time! (str "Read " filename " length = " (count file) " bytes"))
+        ; _    (def db (dt/read-transit-str file))
+        ; _    (println (db/pad-left (- (db/now) @db/*t-start)) "ms " "TOTAL dt/read-transit-str" (count file) "bytes ->" (count (:eavt db)) "datoms")
         ; _    (db/start-bench!)
         ; _    (dt/write-transit-str db)
         ; _    (println (db/pad-left (- (db/now) @db/*t-start)) "ms " "TOTAL dt/write-transit-str" (count (:eavt db)) "datoms ->" (count file) "bytes" )
-        [_ basename] (re-matches #"(.*)\.[^.]+" filename)
-        s    (write-db-v3 db pr-str)
-        _    (spit (str basename "_roundtrip.json") s)
-        _    (db/log-time! (str "Write " (str basename "_roundtrip.json") " length = " (count s) " bytes"))
-        _    (read-db-v3 s edn/read-string)
-        ]
+        ; [_ basename] (re-matches #"(.*)\.[^.]+" filename)
+        ; s    (write-db-v3 db pr-str)
+        ; _    (spit (str basename "_roundtrip.json") s)
+        ; _    (db/log-time! (str "Write " (str basename "_roundtrip.json") " length = " (count s) " bytes"))
+        ; _    (read-db-v3 s edn/read-string)
+
+        db           (read-db-v3 file edn/read-string)
+        _            (db/start-bench!)
+        serializable (ds/serializable db)
+        _            (db/log-time! "ds/serializable")
+        json         (js/JSON.stringify serializable)
+        _            (db/log-time! (str "JSON.stringify " (count json) " bytes"))
+        transit      (write-transit-str serializable)
+        _            (db/log-time! (str "write-transit-str " (count transit) " bytes"))]
     'DONE))
