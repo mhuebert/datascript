@@ -1,5 +1,6 @@
 (ns user
   (:require
+   [clojure.edn :as edn]
    [clojure.string :as str]
    [cognitect.transit :as t]
    [com.cognitect.transit :as transit-js]
@@ -7,6 +8,7 @@
    [datascript.db :as db]
    [datascript.transit :as dt]
    [goog.object :as gobject]
+   [me.tonsky.persistent-sorted-set :as sset]
    [me.tonsky.persistent-sorted-set.arrays :as arrays])
   (:require-macros
    [datascript.db :refer [cond+]]))
@@ -40,6 +42,28 @@
 (defn write-transit-json [o]
   (let [writer (t/writer :json)]
     (.write writer o #js {:marshalTop false})))
+
+(defn attr-comparator
+  "Looks for a datom with attribute exactly bigger than the given one"
+  [^Datom d1 ^Datom d2]
+  (cond 
+    (nil? (.-a d2)) -1
+    (<= (compare (.-a d1) (.-a d2)) 0) -1
+    true 1))
+
+(defn all-attrs
+  "All attrs in a DB, distinct, sorted"
+  [db]
+  (if (empty? (:aevt db))
+    []
+    (loop [attrs (transient [(:a (first (:aevt db)))])]
+      (let [attr      (nth attrs (dec (count attrs)))
+            left      (d/datom nil attr nil)
+            right     (d/datom nil nil nil)
+            next-attr (:a (first (sset/slice (:aevt db) left right attr-comparator)))]
+        (if (some? next-attr)
+          (recur (conj! attrs next-attr))
+          (persistent! attrs))))))
 
 (defn ^:export write-db-v1 [db]
   (db/start-bench!)
@@ -116,47 +140,56 @@
     (reduce (fn [idx x] (arrays/aset arr idx (f idx x)) (inc idx)) 0 xs)
     arr))
 
-(defn ^:export write-db-v3 [db]
+(defn ^:export write-db-v3 [db freeze-fn]
   (db/start-bench!)
-  (let [attrs     (distinct (map :a (:aevt db)))
+  (let [attrs     (all-attrs db)
         attrs-map (into {} (map vector attrs (range)))
         _         (db/log-time! "attrs")
+        *keywords     (volatile! (transient []))
+        *keywords-map (volatile! (transient {}))
         write-v   #(cond
-                     (string? %) %
-                     (number? %) %
-                     (true? %)   %
-                     (false? %)  %
-                     :else #js [(write-transit-json %)])
+                     (string? %)  %
+                     (number? %)  %
+                     (boolean? %) %
+                     (keyword? %) (let [idx (or
+                                              (get @*keywords-map %)
+                                              (let [keywords (vswap! *keywords conj! %)
+                                                    idx      (dec (count keywords))]
+                                                (vswap! *keywords-map assoc! % idx)
+                                                idx))]
+                                    #js {"k" idx})
+                     :else        #js [(freeze-fn %)])
         eavt      (amap-indexed
-                    (fn [idx d]
+                    (fn [^number idx ^Datom d]
                       (set! (.-idx d) idx)
-                      #js [(:e d) (attrs-map (:a d)) (write-v (:v d)) (- (:tx d) db/tx0)])
+                      #js [(.-e d) (attrs-map (.-a d)) (write-v (.-v d)) (- (.-tx d) db/tx0)])
                     (:eavt db))
         _         (db/log-time! "eavt")
         aevt      (amap-indexed (fn [_ d] (.-idx d)) (:aevt db))
         _         (db/log-time! "aevt")
         avet      (amap-indexed (fn [_ d] (.-idx d)) (:avet db))
         _         (db/log-time! "avet")
-        json        #js {"schema" (write-transit-json (:schema db))
-                         "attrs"  (arrays/into-array (map str attrs))
-                         "tx0"    db/tx0
-                         "count"  (count (:eavt db))
-                         "eavt"   eavt
-                         "aevt"   aevt
-                         "avet"   avet}
-        res         (js/JSON.stringify json) ;; nil 2)
-        _           (db/log-time! "JSON.stringify")]
+        json      #js {"schema"   (freeze-fn (:schema db))
+                       "attrs"    (arrays/into-array (map str attrs))
+                       "keywords" (arrays/into-array (map str (persistent! @*keywords)))
+                       "tx0"      db/tx0
+                       "count"    (count (:eavt db))
+                       "eavt"     eavt
+                       "aevt"     aevt
+                       "avet"     avet}
+        res       (js/JSON.stringify json) ;; nil 2)
+        _         (db/log-time! "JSON.stringify")]
     (println (db/pad-left (- (db/now) @db/*t-start)) "ms " "TOTAL write-db-v3" (count (:eavt db)) "datoms ->" (count res) "bytes")
     res))
 
 (defn read-datom [datom-array attrs tx0]
-  (let [e   (aget datom-array 0)
-        a   (nth attrs (aget datom-array 1))
-        v   (aget datom-array 2)
-        v   (if (arrays/array? v)
-              (read-transit-json (aget v 0))
-              v)
-        tx  (+ tx0 (aget datom-array 3))]
+  (let [e  (aget datom-array 0)
+        a  (nth attrs (aget datom-array 1))
+        v  (aget datom-array 2)
+        v  (if (arrays/array? v)
+             (read-transit-json (aget v 0))
+             v)
+        tx (+ tx0 (aget datom-array 3))]
     (db/datom e a v tx)))
 
 (defn read-datoms [msg datoms-array attrs tx0]
@@ -253,14 +286,34 @@
     (println (db/pad-left (- (db/now) @db/*t-start)) "ms " "TOTAL read-db-v2" (count s) "bytes ->" (count (:eavt db)) "datoms")
     db))
 
-(defn ^:export read-db-v3 [s]
+(defn read-datoms-v3 [datoms-array attrs keywords tx0 thaw-fn]
+  (dotimes [i (alength datoms-array)]
+    (let [datom-array (aget datoms-array i)
+          e           (aget datom-array 0)
+          a           (nth attrs (aget datom-array 1))
+          v           (aget datom-array 2)
+          v           (cond
+                        (number? v) v
+                        (string? v) v
+                        (boolean? v) v
+                        (arrays/array? v) (thaw-fn (aget v 0))
+                        :else (let [keyword-idx (arrays/aget v "k")]
+                                (nth keywords keyword-idx)))
+          tx          (+ tx0 (aget datom-array 3))
+          datom       (db/datom e a v tx)]
+      (aset datoms-array i datom)))
+  (db/log-time! (str "read-datoms-v3"))
+  datoms-array)
+
+(defn ^:export read-db-v3 [s thaw-fn]
   (db/start-bench!)
   (let [json        (js/JSON.parse s)
         _           (db/log-time! "JSON.parse")
-        schema      (read-transit-json (aget json "schema"))
+        schema      (thaw-fn (aget json "schema"))
         attrs       (mapv #(if (str/starts-with? % ":") (keyword (subs % 1)) %) (aget json "attrs"))
+        keywords    (mapv #(if (str/starts-with? % ":") (keyword (subs % 1)) %) (aget json "keywords"))
         tx0         (aget json "tx0")
-        eavt        (read-datoms "eavt" (aget json "eavt") attrs tx0)
+        eavt        (read-datoms-v3 (aget json "eavt") attrs keywords tx0 thaw-fn)
         aevt        (delay (amap-indexed (fn [_ idx] (aget eavt idx)) (aget json "aevt")))
         avet        (delay (amap-indexed (fn [_ idx] (aget eavt idx)) (aget json "avet")))
         db          (db/init-db (delay eavt) aevt avet schema)]
@@ -273,9 +326,13 @@
         _    (db/log-time! (str "Read " filename " length = " (count file) " bytes"))
         _    (def db (dt/read-transit-str file))
         _    (println (db/pad-left (- (db/now) @db/*t-start)) "ms " "TOTAL dt/read-transit-str" (count file) "bytes ->" (count (:eavt db)) "datoms")
+        ; _    (db/start-bench!)
+        ; _    (dt/write-transit-str db)
+        ; _    (println (db/pad-left (- (db/now) @db/*t-start)) "ms " "TOTAL dt/write-transit-str" (count (:eavt db)) "datoms ->" (count file) "bytes" )
         [_ basename] (re-matches #"(.*)\.[^.]+" filename)
-        s    (write-db-v3 db)
+        s    (write-db-v3 db pr-str)
         _    (spit (str basename "_roundtrip.json") s)
         _    (db/log-time! (str "Write " (str basename "_roundtrip.json") " length = " (count s) " bytes"))
-        _    (read-db-v3 s)]
+        _    (read-db-v3 s edn/read-string)
+        ]
     'DONE))
